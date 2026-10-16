@@ -1,0 +1,740 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEXUS CODE VALIDATOR — Bash Edition
+# Serveur HTTP + API de validation sur le port 8200
+# 8 validateurs : HTML · CSS · RSS · RDF · i18n · Links · EPUB · WPT
+#
+# Auteur  : Aissa Mohammedi (DGK)
+# Licence : MPL 2.0
+# Version : 1.0.0
+# Usage   : bash nexus-validator.sh [port]
+# ═══════════════════════════════════════════════════════════════════════════════
+
+set -uo pipefail
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+PORT="${1:-8200}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+PUBLIC="$ROOT/public"
+LOGS="$ROOT/logs"
+LOG="$LOGS/validator.log"
+
+mkdir -p "$PUBLIC" "$LOGS"
+
+# ─── Couleurs ─────────────────────────────────────────────────────────────────
+G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'; C='\033[1;36m'
+M='\033[1;35m'; W='\033[1;37m'; D='\033[2m'; N='\033[0m'
+
+ok()   { printf " ${G}✓${N} %s\n" "$*"; }
+ko()   { printf " ${R}✗${N} %s\n" "$*"; }
+info() { printf " ${C}→${N} %s\n" "$*"; }
+warn() { printf " ${Y}!${N} %s\n" "$*"; }
+log()  { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG"; }
+
+# ─── Vérifier socat ───────────────────────────────────────────────────────────
+if ! command -v socat >/dev/null 2>&1; then
+    ko "socat absent → sudo apt install socat"
+    exit 1
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VALIDATEURS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Validateur HTML ──────────────────────────────────────────────────────────
+validate_html() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+
+    # DOCTYPE
+    if ! echo "$content" | grep -qiE '<!DOCTYPE[[:space:]]+html>'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"document",severity:"error",message:"DOCTYPE HTML5 manquant",code:"W3C-DOCTYPE"}]')
+        errors=$((errors + 1))
+    fi
+
+    # html lang
+    if ! echo "$content" | grep -qiE '<html[^>]+lang='; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"i18n",severity:"warning",message:"Attribut lang manquant sur <html>",code:"W3C-LANG"}]')
+        warnings=$((warnings + 1))
+    fi
+
+    # meta charset
+    if ! echo "$content" | grep -qiE '<meta[[:space:]]+charset='; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"i18n",severity:"warning",message:"meta charset manquant",code:"W3C-CHARSET"}]')
+        warnings=$((warnings + 1))
+    fi
+
+    # meta viewport
+    if ! echo "$content" | grep -qiE '<meta[[:space:]]+name="viewport"'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"mobile",severity:"info",message:"meta viewport manquant",code:"W3C-VIEWPORT"}]')
+        info_count=$((info_count + 1))
+    fi
+
+    # Images sans alt
+    while IFS= read -r tag; do
+        [[ -z "$tag" ]] && continue
+        if ! echo "$tag" | grep -qiE 'alt='; then
+            messages=$(echo "$messages" | jq -c '. + [{type:"accessibility",severity:"warning",message:"<img> sans attribut alt",code:"W3C-IMG-ALT"}]')
+            warnings=$((warnings + 1))
+        fi
+    done < <(echo "$content" | grep -oE '<img[^>]*>' || true)
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"NuHtmlChecker",messages:$messages,counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Validateur CSS ───────────────────────────────────────────────────────────
+validate_css() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+
+    # Compter accolades
+    local open close
+    open=$(echo "$content" | tr -cd '{' | wc -c)
+    close=$(echo "$content" | tr -cd '}' | wc -c)
+
+    if (( open != close )); then
+        messages=$(echo "$messages" | jq -c ". + [{type:\"structure\",severity:\"error\",message:\"Accolades déséquilibrées : $open ouvertes vs $close fermées\",code:\"CSS-UNBALANCED\"}]")
+        errors=$((errors + 1))
+    fi
+
+    # z-index négatif
+    if echo "$content" | grep -qE 'z-index[[:space:]]*:[[:space:]]*-[0-9]+'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"quality",severity:"warning",message:"z-index négatif détecté",code:"CSS-NEG-Z-INDEX"}]')
+        warnings=$((warnings + 1))
+    fi
+
+    # url() sans guillemets
+    if echo "$content" | grep -qE 'url\([^"'"'"']'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"syntax",severity:"info",message:"URL sans guillemets dans url()",code:"CSS-URL-QUOTES"}]')
+        info_count=$((info_count + 1))
+    fi
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"CssValidator",messages:$messages,counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Validateur RSS/Atom ──────────────────────────────────────────────────────
+validate_rss() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+    local format="inconnu"
+
+    local content_low
+    content_low=$(echo "$content" | tr '[:upper:]' '[:lower:]')
+
+    if echo "$content_low" | grep -q '<rss'; then
+        format="RSS"
+        for tag in channel title link description; do
+            if ! echo "$content_low" | grep -q "<$tag"; then
+                messages=$(echo "$messages" | jq -c ". + [{type:\"required\",severity:\"error\",message:\"Tag requis manquant : <$tag>\",code:\"RSS-REQUIRED\"}]")
+                errors=$((errors + 1))
+            fi
+        done
+    elif echo "$content_low" | grep -q '<feed'; then
+        format="Atom"
+        for tag in title id updated; do
+            if ! echo "$content_low" | grep -q "<$tag"; then
+                messages=$(echo "$messages" | jq -c ". + [{type:\"required\",severity:\"error\",message:\"Tag requis manquant : <$tag>\",code:\"ATOM-REQUIRED\"}]")
+                errors=$((errors + 1))
+            fi
+        done
+    else
+        messages=$(echo "$messages" | jq -c '. + [{type:"format",severity:"error",message:"Ni RSS ni Atom détecté",code:"FEED-FORMAT"}]')
+        errors=$((errors + 1))
+    fi
+
+    # Compter items/entries
+    local items
+    if [[ "$format" == "RSS" ]]; then
+        items=$(echo "$content_low" | grep -o '<item[ >]' | wc -l)
+    elif [[ "$format" == "Atom" ]]; then
+        items=$(echo "$content_low" | grep -o '<entry[ >]' | wc -l)
+    else
+        items=0
+    fi
+
+    if (( items == 0 )) && [[ "$format" != "inconnu" ]]; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"content",severity:"warning",message:"Aucun item/entry trouvé",code:"FEED-EMPTY"}]')
+        warnings=$((warnings + 1))
+    fi
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --arg format "$format" \
+        --argjson items "$items" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"RssValidator",messages:$messages,metadata:{format:$format,items:$items},counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Validateur i18n ──────────────────────────────────────────────────────────
+validate_i18n() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+
+    # meta charset
+    local charset
+    charset=$(echo "$content" | grep -oiE '<meta[[:space:]]+charset=["'"'"']?[a-z0-9-]+' | head -1 | grep -oiE '[a-z0-9-]+$' || echo "")
+
+    if [[ -z "$charset" ]]; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"i18n",severity:"warning",message:"meta charset manquant",code:"I18N-NO-CHARSET"}]')
+        warnings=$((warnings + 1))
+    elif [[ "$charset" != "utf-8" ]]; then
+        messages=$(echo "$messages" | jq -c ". + [{type:\"i18n\",severity:\"warning\",message:\"Charset : $charset (recommandé : utf-8)\",code:\"I18N-CHARSET\"}]")
+        warnings=$((warnings + 1))
+    fi
+
+    # html lang
+    if ! echo "$content" | grep -qiE '<html[^>]+lang='; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"i18n",severity:"warning",message:"Attribut lang manquant sur <html>",code:"I18N-NO-LANG"}]')
+        warnings=$((warnings + 1))
+    fi
+
+    # BOM
+    if echo "$content" | head -c 3 | od -An -tx1 | grep -q 'ef bb bf'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"i18n",severity:"info",message:"BOM détecté",code:"I18N-BOM"}]')
+        info_count=$((info_count + 1))
+    fi
+
+    # Caractères de contrôle
+    local ctrl_count
+    ctrl_count=$(echo "$content" | grep -cE $'[\x00-\x08\x0B\x0C\x0E-\x1F]' || true)
+    if (( ctrl_count > 0 )); then
+        messages=$(echo "$messages" | jq -c ". + [{type:\"i18n\",severity:\"error\",message:\"$ctrl_count caractères de contrôle Unicode\",code:\"I18N-CONTROL-CHARS\"}]")
+        errors=$((errors + 1))
+    fi
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --arg charset "$charset" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"I18nChecker",messages:$messages,metadata:{charset:$charset},counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Validateur de liens ──────────────────────────────────────────────────────
+validate_links() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+    local links_found=0
+
+    # Extraire les liens
+    while IFS= read -r url; do
+        [[ -z "$url" ]] && continue
+        [[ "$url" == \#* ]] && continue
+        [[ "$url" == mailto:* ]] && continue
+        [[ "$url" == tel:* ]] && continue
+        [[ "$url" == javascript:* ]] && continue
+        [[ "$url" != http* ]] && continue
+
+        links_found=$((links_found + 1))
+
+        # Limiter à 20 liens pour éviter les timeouts
+        if (( links_found > 20 )); then
+            break
+        fi
+
+        # Vérifier le lien (HEAD)
+        local code
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -I "$url" 2>/dev/null || echo "000")
+
+        if [[ "$code" == "000" ]] || [[ "$code" =~ ^[45] ]]; then
+            messages=$(echo "$messages" | jq -c ". + [{type:\"link\",severity:\"warning\",message:\"Lien cassé : $url ($code)\",code:\"LINK-BROKEN\"}]")
+            warnings=$((warnings + 1))
+        fi
+    done < <(echo "$content" | grep -oE 'href=["'"'"']([^"'"'"']+)' | sed 's/href=["'"'"']//' | head -20)
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --argjson links_found "$links_found" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"LinkChecker",messages:$messages,metadata:{links_found:$links_found},counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Validateur RDF ───────────────────────────────────────────────────────────
+validate_rdf() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+    local format="inconnu"
+
+    local content_low
+    content_low=$(echo "$content" | tr '[:upper:]' '[:lower:]')
+
+    if echo "$content" | grep -q '^{' || echo "$content_low" | grep -q '"@context"'; then
+        format="JSON-LD"
+        if ! echo "$content_low" | grep -q '"@context"'; then
+            messages=$(echo "$messages" | jq -c '. + [{type:"semantic",severity:"error",message:"@context manquant en JSON-LD",code:"JSONLD-NO-CONTEXT"}]')
+            errors=$((errors + 1))
+        fi
+    elif echo "$content" | grep -q '@prefix\|@base'; then
+        format="Turtle"
+        if ! echo "$content_low" | grep -q '@prefix'; then
+            messages=$(echo "$messages" | jq -c '. + [{type:"syntax",severity:"info",message:"Aucun @prefix trouvé",code:"TURTLE-NO-PREFIX"}]')
+            info_count=$((info_count + 1))
+        fi
+    elif echo "$content" | grep -q '<rdf:'; then
+        format="RDF/XML"
+    fi
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --arg format "$format" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"RdfValidator",messages:$messages,metadata:{format:$format},counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Validateur EPUB ──────────────────────────────────────────────────────────
+validate_epub() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+
+    if ! echo "$content" | grep -q 'container.xml\|META-INF'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"structure",severity:"error",message:"META-INF/container.xml non trouvé",code:"EPUB-NO-CONTAINER"}]')
+        errors=$((errors + 1))
+    fi
+
+    if ! echo "$content" | grep -q 'application/epub+zip'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"structure",severity:"warning",message:"Mimetype application/epub+zip non détecté",code:"EPUB-MIMETYPE"}]')
+        warnings=$((warnings + 1))
+    fi
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"EpubChecker",messages:$messages,counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Validateur WPT ───────────────────────────────────────────────────────────
+validate_wpt() {
+    local content="$1"
+    local errors=0 warnings=0 info_count=0
+    local messages="[]"
+
+    if echo "$content" | grep -q 'http-equiv' && echo "$content" | grep -q 'Content-Type'; then
+        messages=$(echo "$messages" | jq -c '. + [{type:"http",severity:"info",message:"Utilise http-equiv au lieu de Content-Type HTTP",code:"WPT-HTTP-CONTENT-TYPE"}]')
+        info_count=$((info_count + 1))
+    fi
+
+    jq -nc \
+        --argjson messages "$messages" \
+        --argjson errors "$errors" \
+        --argjson warnings "$warnings" \
+        --argjson info "$info_count" \
+        '{validator:"WebPlatformTests",messages:$messages,counts:{errors:$errors,warnings:$warnings,info:$info,total:($errors+$warnings+$info)}}'
+}
+
+# ─── Orchestrateur ────────────────────────────────────────────────────────────
+validate_all() {
+    local content="$1"
+    local validators="$2"
+
+    local results="{}"
+    local total_errors=0 total_warnings=0 total_info=0
+
+    for v in $validators; do
+        local r
+        case "$v" in
+            html) r=$(validate_html "$content") ;;
+            css)  r=$(validate_css "$content") ;;
+            rss)  r=$(validate_rss "$content") ;;
+            rdf)  r=$(validate_rdf "$content") ;;
+            i18n) r=$(validate_i18n "$content") ;;
+            link) r=$(validate_links "$content") ;;
+            epub) r=$(validate_epub "$content") ;;
+            wpt)  r=$(validate_wpt "$content") ;;
+            *) continue ;;
+        esac
+
+        results=$(echo "$results" | jq --arg k "$v" --argjson v "$r" '. + {($k): $v}')
+
+        local e w i
+        e=$(echo "$r" | jq -r '.counts.errors // 0')
+        w=$(echo "$r" | jq -r '.counts.warnings // 0')
+        i=$(echo "$r" | jq -r '.counts.info // 0')
+
+        total_errors=$((total_errors + e))
+        total_warnings=$((total_warnings + w))
+        total_info=$((total_info + i))
+    done
+
+    jq -nc \
+        --argjson results "$results" \
+        --argjson errors "$total_errors" \
+        --argjson warnings "$total_warnings" \
+        --argjson info "$total_info" \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{
+            timestamp: $ts,
+            validators_run: ($results | keys),
+            results: $results,
+            summary: {
+                errors: $errors,
+                warnings: $warnings,
+                info: $info,
+                success: ($errors == 0)
+            }
+        }'
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HTTP HANDLER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+send_response() {
+    local status="$1" mime="$2" body="$3" len
+    len=$(printf '%s' "$body" | wc -c)
+    printf 'HTTP/1.1 %s\r\n' "$status"
+    printf 'Content-Type: %s\r\n' "$mime"
+    printf 'Content-Length: %d\r\n' "$len"
+    printf 'Access-Control-Allow-Origin: *\r\n'
+    printf 'Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n'
+    printf 'Access-Control-Allow-Headers: Content-Type\r\n'
+    printf 'Connection: close\r\n'
+    printf '\r\n'
+    printf '%s' "$body"
+}
+
+handle_request() {
+    local method path http_version
+    read -t 5 -r method path http_version 2>/dev/null || return 1
+
+    # Headers
+    local content_length=0 header
+    while IFS= read -t 2 -r header; do
+        header="${header%$'\r'}"
+        [[ -z "$header" ]] && break
+        if [[ "$header" =~ ^Content-Length:\ *([0-9]+) ]]; then
+            content_length="${BASH_REMATCH[1]}"
+        fi
+    done
+
+    # Body
+    local body=""
+    if (( content_length > 0 && content_length < 5000000 )); then
+        body=$(head -c "$content_length" 2>/dev/null)
+    fi
+
+    path="${path%%\?*}"
+
+    log "$method $path"
+
+    case "$method $path" in
+        "GET /"|"GET /index.html")
+            if [[ -f "$PUBLIC/index.html" ]]; then
+                local content
+                content=$(cat "$PUBLIC/index.html")
+                send_response "200 OK" "text/html; charset=utf-8" "$content"
+            else
+                send_response "404 Not Found" "text/plain" "index.html introuvable"
+            fi
+            ;;
+
+        "GET /api/health")
+            send_response "200 OK" "application/json" \
+                "{\"ok\":true,\"port\":$PORT,\"version\":\"1.0.0\",\"validators\":[\"html\",\"css\",\"rss\",\"rdf\",\"i18n\",\"link\",\"epub\",\"wpt\"]}"
+            ;;
+
+        "POST /api/validate")
+            # Extraire content et validators du JSON
+            local content validators
+            content=$(printf '%s' "$body" | jq -r '.content // ""' 2>/dev/null || echo "")
+            validators=$(printf '%s' "$body" | jq -r '.validators // ["html","css","i18n"] | join(" ")' 2>/dev/null || echo "html css i18n")
+
+            if [[ -z "$content" ]]; then
+                send_response "400 Bad Request" "application/json" \
+                    '{"error":"content missing"}'
+                return
+            fi
+
+            local result
+            result=$(validate_all "$content" "$validators")
+            send_response "200 OK" "application/json" "$result"
+            ;;
+
+        "OPTIONS /api/validate")
+            printf 'HTTP/1.1 204 No Content\r\n'
+            printf 'Access-Control-Allow-Origin: *\r\n'
+            printf 'Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n'
+            printf 'Access-Control-Allow-Headers: Content-Type\r\n'
+            printf 'Connection: close\r\n\r\n'
+            ;;
+
+        *)
+            send_response "404 Not Found" "text/plain" "404 — $path"
+            ;;
+    esac
+}
+
+export -f handle_request send_response validate_all validate_html validate_css validate_rss validate_rdf validate_i18n validate_links validate_epub validate_wpt log
+export PORT PUBLIC LOG
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UI HTML
+# ═══════════════════════════════════════════════════════════════════════════════
+
+create_ui() {
+    cat > "$PUBLIC/index.html" << 'HTML'
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexus Code Validator — Bash Edition</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0a0e1a;color:#c8e0f8;padding:24px;min-height:100vh;background-image:radial-gradient(ellipse at top,rgba(80,150,255,0.08),transparent 60%)}
+.container{max-width:1300px;margin:0 auto}
+h1{font-size:clamp(22px,4vw,36px);font-weight:800;letter-spacing:-1.5px;background:linear-gradient(135deg,#5096ff,#b366ff,#00ff88);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
+.subtitle{color:#607090;font-size:13px;font-family:ui-monospace,monospace;margin-bottom:20px}
+.badges{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+.badge{padding:5px 12px;border-radius:999px;font-size:10px;font-family:ui-monospace,monospace;font-weight:700;background:rgba(80,150,255,0.1);border:1px solid #5096ff;color:#5096ff}
+.panel{background:#131825;border:1px solid #253050;border-radius:14px;padding:20px;margin-bottom:16px}
+.panel h2{color:#5096ff;font-size:12px;letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid #253050}
+textarea{width:100%;padding:14px;background:#000;border:1px solid #253050;border-radius:10px;color:#a0f0d0;font-family:ui-monospace,monospace;font-size:13px;outline:none;resize:vertical;line-height:1.6;min-height:200px}
+textarea:focus{border-color:#5096ff;box-shadow:0 0 20px rgba(80,150,255,0.2)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.btn{background:linear-gradient(135deg,#5096ff,#b366ff);color:#fff;border:none;padding:12px 22px;border-radius:10px;font-weight:700;cursor:pointer;font-family:ui-monospace,monospace;font-size:12px;letter-spacing:1px;text-transform:uppercase;transition:all 0.3s}
+.btn:hover{transform:translateY(-2px);box-shadow:0 5px 20px rgba(80,150,255,0.4)}
+.btn.green{background:linear-gradient(135deg,#00ff88,#00d4ff);color:#000}
+.btn.red{background:linear-gradient(135deg,#ff3366,#ff6b35);color:#fff}
+.validators-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.v-check{display:flex;align-items:center;gap:6px;padding:8px 12px;background:#0a0f1a;border:1px solid #253050;border-radius:8px;font-size:11px;font-family:ui-monospace,monospace;cursor:pointer}
+.v-check input{width:auto}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px}
+.stat{background:#0a0f1a;border:1px solid #253050;border-radius:10px;padding:14px;text-align:center}
+.stat .l{color:#607090;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
+.stat .v{color:#5096ff;font-size:24px;font-weight:800;font-family:ui-monospace,monospace}
+.stat .v.ok{color:#00ff88}
+.stat .v.warn{color:#ffaa00}
+.stat .v.danger{color:#ff3366}
+.msg{padding:10px 14px;border-left:3px solid #5096ff;background:rgba(80,150,255,0.05);margin-bottom:6px;font-size:12px;font-family:ui-monospace,monospace}
+.msg.error{border-left-color:#ff3366;background:rgba(255,51,102,0.08)}
+.msg.warning{border-left-color:#ffaa00;background:rgba(255,170,0,0.05)}
+.msg.info{border-left-color:#00d4ff;background:rgba(0,212,255,0.05)}
+.msg .type{color:#5096ff;font-weight:700}
+.result{background:#000;border:1px solid #253050;border-radius:10px;padding:18px;font-family:ui-monospace,monospace;font-size:12px;color:#a0f0d0;white-space:pre-wrap;overflow:auto;line-height:1.7;margin-top:12px;max-height:600px}
+.footer{text-align:center;color:#303040;font-size:11px;margin-top:40px;padding-top:20px;border-top:1px solid #253050;font-family:ui-monospace,monospace}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>🧬 Nexus Code Validator — Bash Edition</h1>
+<p class="subtitle">8 validateurs · HTML · CSS · RSS · RDF · i18n · Links · EPUB · WPT · Port 8200</p>
+
+<div class="badges">
+<div class="badge">Bash pur</div>
+<div class="badge">socat</div>
+<div class="badge">jq</div>
+<div class="badge">Port 8200</div>
+<div class="badge">MPL 2.0</div>
+</div>
+
+<div class="panel">
+<h2>📝 Code à valider</h2>
+<textarea id="content"><!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Test</title>
+</head>
+<body>
+<h1>Bonjour</h1>
+<img src="test.png">
+</body>
+</html></textarea>
+</div>
+
+<div class="panel">
+<h2>⚙️ Validateurs</h2>
+<div class="validators-grid">
+<label class="v-check"><input type="checkbox" value="html" checked>HTML</label>
+<label class="v-check"><input type="checkbox" value="css" checked>CSS</label>
+<label class="v-check"><input type="checkbox" value="rss">RSS/Atom</label>
+<label class="v-check"><input type="checkbox" value="rdf">RDF</label>
+<label class="v-check"><input type="checkbox" value="i18n" checked>i18n</label>
+<label class="v-check"><input type="checkbox" value="link" checked>Links</label>
+<label class="v-check"><input type="checkbox" value="epub">EPUB</label>
+<label class="v-check"><input type="checkbox" value="wpt">WPT</label>
+</div>
+<div class="actions">
+<button class="btn" onclick="valider()">🔍 VALIDER</button>
+<button class="btn green" onclick="validerTout()">⚡ TOUT</button>
+<button class="btn red" onclick="document.getElementById('content').value=''">🗑️ VIDER</button>
+</div>
+</div>
+
+<div class="panel" id="result-panel" style="display:none">
+<h2>📊 Résultats</h2>
+<div class="stats" id="stats"></div>
+<div id="messages"></div>
+<div class="result" id="raw-json"></div>
+</div>
+
+<div class="footer">Nexus Code Validator · Bash + socat · MPL 2.0 · Aissa Mohammedi (DGK)</div>
+</div>
+
+<script>
+function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+function getSelected(){
+return Array.from(document.querySelectorAll('.v-check input:checked')).map(i => i.value);
+}
+
+function showLoader(msg){
+document.getElementById('result-panel').style.display = 'block';
+document.getElementById('stats').innerHTML = '<div class="stat"><div class="l">Statut</div><div class="v">'+esc(msg)+'</div></div>';
+document.getElementById('messages').innerHTML = '';
+document.getElementById('raw-json').textContent = '';
+}
+
+async function valider(){
+const content = document.getElementById('content').value;
+const validators = getSelected();
+if(!content.trim() || !validators.length) return;
+showLoader('Validation...');
+try{
+const r = await fetch('/api/validate', {
+method:'POST',
+headers:{'Content-Type':'application/json'},
+body: JSON.stringify({content, validators})
+});
+const d = await r.json();
+render(d);
+}catch(e){ document.getElementById('raw-json').textContent = 'Erreur: ' + e.message; }
+}
+
+async function validerTout(){
+document.querySelectorAll('.v-check input').forEach(i => i.checked = true);
+await valider();
+}
+
+function render(d){
+const s = d.summary || {};
+document.getElementById('stats').innerHTML =
+'<div class="stat"><div class="l">Erreurs</div><div class="v '+((s.errors||0)>0?'danger':'ok')+'">'+(s.errors||0)+'</div></div>' +
+'<div class="stat"><div class="l">Warnings</div><div class="v '+((s.warnings||0)>0?'warn':'ok')+'">'+(s.warnings||0)+'</div></div>' +
+'<div class="stat"><div class="l">Info</div><div class="v">'+(s.info||0)+'</div></div>' +
+'<div class="stat"><div class="l">Validateurs</div><div class="v">'+((d.validators_run||[]).length)+'</div></div>' +
+'<div class="stat"><div class="l">Statut</div><div class="v '+(s.success?'ok':'danger')+'">'+(s.success?'OK':'ÉCHEC')+'</div></div>';
+
+let msgs = '';
+Object.entries(d.results || {}).forEach(([v, r]) => {
+if (r.messages && r.messages.length){
+r.messages.forEach(m => {
+msgs += '<div class="msg '+esc(m.severity)+'">' +
+'<span class="type">['+esc(v)+']</span> ' +
+'<b>'+esc(m.severity)+'</b> ' +
+esc(m.message) + '</div>';
+});
+}
+});
+if (!msgs) msgs = '<div class="msg info">✓ Aucun problème détecté</div>';
+document.getElementById('messages').innerHTML = msgs;
+
+document.getElementById('raw-json').textContent = JSON.stringify(d, null, 2);
+}
+</script>
+</body>
+</html>
+HTML
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BANNIÈRE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+banner() {
+    printf '\n'
+    printf "${M}╔══════════════════════════════════════════════════════════════════════╗${N}\n"
+    printf "${M}║${N}     ${W}███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗${N}                     ${M}║${N}\n"
+    printf "${M}║${N}     ${W}████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝${N}                     ${M}║${N}\n"
+    printf "${M}║${N}     ${W}██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗${N}                     ${M}║${N}\n"
+    printf "${M}║${N}     ${W}██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║${N}                     ${M}║${N}\n"
+    printf "${M}║${N}     ${W}██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║${N}                     ${M}║${N}\n"
+    printf "${M}║${N}     ${W}╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝${N}                     ${M}║${N}\n"
+    printf "${M}║${N}              ${C}CODE VALIDATOR — BASH EDITION${N}                       ${M}║${N}\n"
+    printf "${M}║${N}              ${D}8 validateurs · Port ${PORT}${N}                            ${M}║${N}\n"
+    printf "${M}╚══════════════════════════════════════════════════════════════════════╝${N}\n"
+    printf '\n'
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+main() {
+    banner
+
+    # Vérifier dépendances
+    for cmd in socat jq curl; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            ko "$cmd manquant"
+            info "Installation : sudo apt install socat jq curl"
+            exit 1
+        fi
+    done
+
+    # Créer UI
+    create_ui
+
+    # Vérifier port
+    if ss -tln 2>/dev/null | grep -q ":$PORT "; then
+        warn "Port $PORT occupé"
+        while ss -tln 2>/dev/null | grep -q ":$PORT "; do
+            PORT=$((PORT + 1))
+            (( PORT > 8300 )) && { ko "Aucun port libre 8200-8300"; exit 1; }
+        done
+        info "Utilisation du port $PORT"
+    fi
+
+    local ip_local
+    ip_local=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo "127.0.0.1")
+
+    ok "Serveur démarré"
+    info "Port    : $PORT"
+    info "Local   : http://localhost:$PORT/"
+    info "Réseau  : http://$ip_local:$PORT/"
+    info "API     : http://localhost:$PORT/api/validate"
+    info "Log     : $LOG"
+    printf '\n'
+    warn "Ctrl+C pour arrêter"
+    printf '\n'
+
+    log "Server started on port $PORT"
+
+    trap 'printf "\n"; info "Arrêt"; log "Server stopped"; exit 0' INT TERM
+
+    # Ouvrir navigateur
+    if command -v xdg-open >/dev/null 2>&1; then
+        (sleep 1; xdg-open "http://localhost:$PORT/" >/dev/null 2>&1 &) || true
+    fi
+
+    socat TCP-LISTEN:"$PORT",reuseaddr,fork \
+          EXEC:"bash -c 'handle_request'" 2>/dev/null
+}
+
+main "$@"
