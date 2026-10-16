@@ -1,0 +1,291 @@
+🖥️ NEXUS STUDIO — Documentation Fonctionnelle
+
+    Studio de développement complet local — Orchestrateur multi-langages
+
+📌 Qu'est-ce que Nexus Studio ?
+
+Nexus Studio est une suite de développement locale et souveraine qui remplace les IDE cloud par une solution entièrement auto-hébergée sur votre machine. C'est l'équivalent fonctionnel de VS Code, IntelliJ et PyCharm réunis, mais sans dépendance à des serveurs externes, sans télémétrie, sans compte obligatoire.
+Philosophie principale
+Principe	Traduction
+Local-first	Tout fonctionne hors ligne, 100% sur votre machine
+Souveraineté	Vos données ne quittent jamais votre poste
+Orchestration	Bash pilote Python/Java/Rust/Node selon besoins
+Extensibilité	Ajoutez des outils sans recompiler
+Transparence	Code ouvert, architecture visible, zéro boîte noire
+🎯 Ce que Nexus Studio fait concrètement
+1. Édition de Code
+┌─────────────────────────────────────────────────────────────┐
+│                    ÉDITEUR NEXUS                            │
+├─────────────────────────────────────────────────────────────┤
+│ • Syntax highlighting (50+ langages)                       │
+│ • Auto-completion via LSP (Language Server Protocol)       │
+│ • Numéros de ligne + surlignage                            │
+│ • Onglets multiples                                        │
+│ • Sauvegarde automatique (2s interval)                     │
+│ • Recherche/replacement dans le projet                     │
+└─────────────────────────────────────────────────────────────┘
+
+Supporté :
+
+    Python (.py) — avec linting pylint/flake8/mypy
+    Java (.java) — avec javac + JUnit integration
+    Rust (.rs) — avec cargo/clippy/rustfmt
+    JavaScript/TypeScript (.js/.ts) — avec ESLint/Prettier
+    C/C++ (.c/.cpp/.h) — avec clang-tidy/clang-format
+    Go (.go) — avec go vet/gofmt
+    PHP (.php) — avec PHPStan/PHPCS
+    Ruby (.rb) — avec RuboCop/RSpec
+    SQL (.sql) — avec sqlfluff
+    YAML/JSON/Markdown — avec validateurs dédiés
+
+2. Build & Compilation
+
+Détection automatique du système de build :
+Fichier détecté	Commande exécutée
+Cargo.toml	cargo build --release
+package.json	npm run build
+pom.xml	mvn clean package
+build.gradle	gradle build
+CMakeLists.txt	cmake -B build && cmake --build build
+Makefile	make
+pyproject.toml	poetry build ou pip install -e .
+go.mod	go build ./...
+
+Avantage : Pas besoin de configurer manuellement — Nexus Studio détecte et exécute le bon build.
+3. Exécution de Code
+# Depuis l'interface ou en CLI
+./nexus-studio.py script.py     # Python
+./nexus-studio.py Main.java     # Java
+./nexus-studio.py lib.rs        # Rust
+./nexus-studio.py app.ts        # TypeScript
+
+Le studio orchestre :
+
+    Compilation si nécessaire (Java, Rust, C++)
+    Environnement virtuel (Python virtualenv/venv)
+    Sortie terminal intégrée dans l'interface
+    Debugging basique via breakpoints (via LSP)
+
+4. Gestion de Projets (Git)
+
+Fonctionnalités Git intégrées :
+Action	Commande backend
+Status	git status --short
+Log	git log --oneline -10
+Diff	git diff HEAD
+Pull	git pull origin main
+Push	git push origin main
+Commit	git commit -m "message"
+Branch	git branch -a
+Checkout	git checkout -b nouvelle-branch
+Merge	git merge feature
+
+Visualisation :
+
+    Arbre de commits
+    Fichiers modifiés/staged/untracked
+    Historique de changements
+    Blame ligne par ligne
+
+5. Tests & Qualité
+
+Exécution de tests multi-langages :
+Langage	Outil de test	Commande
+Python	pytest/unittest	pytest -v
+Java	JUnit/TestNG	mvn test
+Rust	cargo-test	cargo test
+Go	go-test	go test ./...
+JS/TS	Jest/Mocha/Vitest	npm test
+PHP	PHPUnit/Pest	vendor/bin/phpunit
+Ruby	RSpec	rspec
+C/C++	CTest/Catch2	ctest --output-on-failure
+
+Linting continu :
+
+    ESLint pour JavaScript
+    Pylint/Mypy pour Python
+    Clippy pour Rust
+    golangci-lint pour Go
+    Checkstyle pour Java
+    ShellCheck pour Bash
+
+6. Sécurité & Scan
+
+Analyseurs intégrés :
+Outil	Type	Détection
+Trivy/Grype	Vulnérabilités	CVE dans dépendances
+Bandit/Safety	Python security	Secrets + vulns
+Semgrep	Static analysis	Patterns dangereux
+Gitleaks/TruffleHog	Secrets	API keys + credentials
+OWASP ZAP/Nuclei	Web security	Vulnérabilités web
+npm-audit/yarn-audit	Node security	Packages vulnérables
+cargo-audit	Rust security	Crates vulnérables
+
+Rapports :
+
+    JSON exportable
+    HTML synthétique
+    Intégration CI/CD possible
+
+7. Extensions & Plugins
+
+Marketplace locale :
+Extensions installées :
+├── 🐍 Python Extension
+├── ☕ Java Pack
+├── 🦀 Rust Analyzer
+├── 🐹 Go Extension
+├── ⚛️ React Developer Tools
+├── 🐳 Docker Support
+└── 🌳 GitLens
+
+Toutes installées localement — pas de téléchargement à chaud.
+
+Créer une extension :
+
+    Créer extension.json avec métadonnées
+    Ajouter install.sh pour installation
+    Placer dans ~/.nexus/extensions/
+    Redémarrer Nexus Studio
+
+8. Terminal Intégré
+
+Console interactive :
+$ ./nexus-studio.py --terminal
+[NEXUS] $ python3 --version
+Python 3.12.0
+[NEXUS] $ cargo build --release
+Compiling nexus v1.0.0...
+Finished release [optimized]
+[NEXUS] $ git status
+On branch main
+Untracked files:
+  src/new_feature.py
+
+Commandes supportées :
+
+    Toutes les commandes shell standard
+    Commandes Nexus shortcuts (build, test, lint, run)
+    Tab-completion automatique
+    Historique persistant
+
+9. Télémetrie & Stats
+
+Suivi d'utilisation :
+Métrique	Collectée	Usage
+File reads	Oui	Optimisation chargement
+File writes	Oui	Audit de modifications
+Commands run	Oui	Tracking usage
+Build time	Oui	Performance profiling
+Test results	Oui	CI dashboards
+
+Logs structurés :
+
+    Format JSON (events.jsonl)
+    Rotation automatique (1Mo max)
+    Filtres par niveau (DEBUG/INFO/WARN/ERROR)
+
+10. Export & Rapport
+
+Formats de sortie :
+Type	Formats disponibles
+Code	ZIP archive, Tarball
+Documentation	Markdown, PDF, HTML
+Rapports	JSON, CSV, HTML
+Tests	JUnit XML, Cobertura
+Sécurité	SARIF, CycloneDX SBOM
+
+Exemple rapport qualité :
+╔══════════════════════════════════════════════════════════════╗
+║          RAPPORT QUALITÉ — PROJECT NEXUS                    ║
+╠══════════════════════════════════════════════════════════════╣
+║  Code Coverage  : 87%                                       ║
+║  Lines Analyzed : 12,450                                    ║
+║  Errors Found   : 3                                         ║
+║  Warnings       : 12                                        ║
+║  Security Issues: 0                                         ║
+║  Build Time     : 24s                                       ║
+║  Test Pass Rate : 98.5%                                     ║
+╚══════════════════════════════════════════════════════════════╝
+🔧 Architecture Technique
+┌────────────────────────────────────────────────────────────────┐
+│                   INTERFACE UTILISATEUR                        │
+│              (HTML/JS — Serveur HTTP intégré)                  │
+├────────────────────────────────────────────────────────────────┤
+│                   COUCHE ORCHESTRATEUR                         │
+│                    (SCRIPT BASH PRINCIPAL)                     │
+│  • Gestion ports • Traps • Logging • Menu • Stats             │
+├────────────────────────────────────────────────────────────────┤
+│                   SERVICES BACKEND                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │  Python HTTP │  │   Java JVM   │  │   Rust CLI   │          │
+│  │  (File Ops)  │  │ (Compile/Run)│  │(Cargo/Rustc) │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘          │
+├────────────────────────────────────────────────────────────────┤
+│                   OUTILS DELEGUÉS                              │
+│  200+ APIs : Git, Build, Lint, Test, Security, Deploy         │
+└────────────────────────────────────────────────────────────────┘
+📊 Comparaison avec les Solutions Cloud
+Fonctionnalité	Nexus Studio	VS Code Cloud	Jetbrains Gateway
+Hébergement	Local 100%	Cloud + Local	Hybride
+Télémétrie	Zéro	Obligatoire	Obligatoire
+Compte requis	Non	Oui	Oui
+Hors ligne	Complet	Limité	Partiel
+Prix	Gratuit	Freemium	Payant
+Données	Vous contrôlez	Microsoft/Adobe	Vous contrôlez
+Extensibilité	Total	Plugin store	Plugin store
+🚀 Cas d'Usage Typiques
+Développeur Solo
+1. Clone repository → git clone https://github.com/...
+2. Lance Nexus Studio → ./nexus-studio.sh
+3. Le projet est détecté → Build automatique
+4. Écrit du code → Sauvegarde auto
+5. Exécute tests → `npm test` ou `cargo test`
+6. Push vers remote → Git intégré
+Entreprise Sécurisée
+1. Déploiement interne sur serveur dédié
+2. Aucune donnée sortante du réseau
+3. Audit de tous les événements
+4. Extensions whitelistées uniquement
+5. Rapports de conformité générés
+Enseignement/Formation
+1. Distribution aux étudiants
+2. Environnement uniforme pour tous
+3. Pas de dépendance internet
+4. Evaluation des exercices facilitée
+5. Rapports automatisés
+⚠️ Limitations Connues
+Limite	Contournement
+Pas de remote SSH natif	Utilisez ssh dans terminal intégré
+Pas de collaboration temps réel	Export/import manuel ou git
+Pas d'IA intégrée	Connectez votre propre LLM local
+Pas de cloud sync	Utilisez votre solution de stockage
+Performances sur très gros projets	Augmentez RAM/sortez en CLI directe
+ℹ️ Informations Techniques
+Élément	Valeur
+Version actuelle	3.0.0-bash
+Auteur	Aissa Mohammedi (DGK)
+Licence	NEXUS-OPEN-2.0
+Langage principal	Bash (orchestrateur)
+Backend	Python/Java/Rust/Node
+Port par défaut	5000
+Taille du code	~3500 lignes
+Dépendances minimales	bash, curl, jq, python3
+OS supportés	Linux, macOS, Windows (WSL)
+📞 Contact & Contribution
+
+    GitHub : https://github.com/Aissamohammedi88
+    Email : nodepy6@proton.me (encrypted)
+    Licence : NEXUS-OPEN-2.0 (GPL-compatible)
+
+Contributions acceptées :
+
+    ✨ Thèmes visuels
+    🐛 Corrections de bugs
+    🔧 Nouvelles extensions
+    📚 Documentation
+    🌍 Traductions
+
+🏁 Conclusion
+
+Nexus Studio n'est pas un simple éditeur — c'est un écosystème de développement complet conçu pour ceux qui refusent de sacrifier la souveraineté de leurs données à la commodité du cloud. Que vous soyez développeur indépendant, entreprise soucieuse de sécurité, ou enseignant cherchant un environnement contrôlé, Nexus Studio offre une alternative viable aux solutions propriétaires tout en restant entièrement gratuit et extensible.
